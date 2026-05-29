@@ -261,16 +261,14 @@ async def chat(req: ChatRequest):
 async def chat_stream(req: ChatRequest):
     """Stream a question about tournament data using GraphRAG."""
     try:
-        if os.environ.get("VERCEL") == "1":
-            from fastapi.responses import Response
-            chunks = []
-            for chunk in generate_answer_stream(req.question):
-                chunks.append(chunk)
-            return Response(content="".join(chunks), media_type="application/x-ndjson")
-
         return StreamingResponse(
             generate_answer_stream(req.question),
             media_type="application/x-ndjson",
+            headers={
+                "X-Accel-Buffering": "no",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
         )
     except Exception as e:
         logger.error(f"Chat stream error: {e}")

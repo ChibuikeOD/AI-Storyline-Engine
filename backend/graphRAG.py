@@ -5,6 +5,7 @@ import re
 import requests
 from typing import Iterator
 from neo4j import GraphDatabase
+from database import driver
 from huggingface_hub import InferenceClient
 from huggingface_hub.errors import HfHubHTTPError
 from constants import DEFAULT_ELO_RATING
@@ -179,8 +180,6 @@ def detect_mentioned_players(query: str) -> list[str]:
         return []
 
     try:
-        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
-        driver.verify_connectivity()
         with driver.session() as session:
             res = session.run(
                 """
@@ -191,7 +190,6 @@ def detect_mentioned_players(query: str) -> list[str]:
                 keywords=filtered_keywords
             )
             raw_matches = [r["gamertag"] for r in res if r["gamertag"]]
-        driver.close()
 
         query_lower = query.lower()
         mentioned = set()
@@ -229,8 +227,6 @@ def detect_mentioned_events(query: str) -> list[str]:
         return []
 
     try:
-        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
-        driver.verify_connectivity()
         with driver.session() as session:
             res = session.run(
                 """
@@ -245,7 +241,6 @@ def detect_mentioned_events(query: str) -> list[str]:
                 alias_names=[n.lower() for n in alias_matches]
             )
             event_names = [r["name"] for r in res if r["name"]]
-        driver.close()
 
         final_events = set()
         for name in event_names:
@@ -278,80 +273,42 @@ def get_local_context(player_names: list[str]) -> str:
     t0 = time.time()
     _agent_log("neo4j_local_context_start", {"players": player_names}, "A_local")
     try:
-        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
-        driver.verify_connectivity()
+        with driver.session() as session:
+            details_res = session.run(
+                player_details_cypher,
+                player_names=player_names,
+                default_rating=DEFAULT_ELO_RATING,
+            )
+            for record in details_res:
+                events_str = ", ".join(record["events"]) if record["events"] else "None"
+                context_lines.append(
+                    f"### Player Profile: {record['gamertag']}\n"
+                    f"* **Rating**: {record['rating']}\n"
+                    f"* **Events Participated**: {events_str}\n"
+                )
+
+            sets_res = session.run(
+                player_sets_cypher,
+                player_names=player_names,
+                default_rating=DEFAULT_ELO_RATING,
+            )
+            sets_lines = []
+            for record in sets_res:
+                line = (
+                    f"- {record['p1']} (Rating: {record['p1_rating']}) vs {record['p2']} (Rating: {record['p2_rating']}), "
+                    f"winner: {record['winner']}, event: {record['event']} ({record['tournament']})."
+                )
+                sets_lines.append(line)
+
+            if sets_lines:
+                context_lines.append("### Relevant Matches")
+                context_lines.extend(sets_lines)
+            else:
+                context_lines.append("### Relevant Matches\n* No matches found in database.")
     except Exception as exc:
-        print(f"Neo4j unavailable ({exc}); using fallback local context.")
+        print(f"Neo4j query failed ({exc}); using fallback local context.")
         _agent_log("neo4j_local_context_fallback", {"error": str(exc)}, "A_local")
         return ""
-
-    context_lines = []
-
-    player_details_cypher = """
-    MATCH (p:Player)
-    WHERE p.gamertag IN $player_names
-    OPTIONAL MATCH (p)-[:PARTICIPATED_IN]->(e:Event)
-    RETURN p.gamertag AS gamertag,
-           coalesce(p.rating, $default_rating) AS rating,
-           collect(coalesce(e.name, 'unknown')) AS events
-    """
-
-    player_sets_cypher = """
-    MATCH (p:Player)
-    WHERE p.gamertag IN $player_names
-    MATCH (s:Set)-[:PLAYER1|PLAYER2]->(p)
-    MATCH (s)-[:PLAYER1]->(p1:Player)
-    MATCH (s)-[:PLAYER2]->(p2:Player)
-    MATCH (s)-[:PLAYED_IN]->(e:Event)
-    OPTIONAL MATCH (w:Player {id: s.winner_id})
-    RETURN p.gamertag AS player,
-           s.id AS set_id,
-           coalesce(p1.gamertag, '?') AS p1,
-           coalesce(p1.rating, $default_rating) AS p1_rating,
-           coalesce(p2.gamertag, '?') AS p2,
-           coalesce(p2.rating, $default_rating) AS p2_rating,
-           coalesce(w.gamertag, 'unknown') AS winner,
-           coalesce(e.name, '?') AS event,
-           coalesce(e.tournament_name, '?') AS tournament,
-           coalesce(s.completed_at, '') AS completed_at
-    ORDER BY s.completed_at DESC
-    LIMIT 100
-    """
-
-    with driver.session() as session:
-        details_res = session.run(
-            player_details_cypher,
-            player_names=player_names,
-            default_rating=DEFAULT_ELO_RATING,
-        )
-        for record in details_res:
-            events_str = ", ".join(record["events"]) if record["events"] else "None"
-            context_lines.append(
-                f"### Player Profile: {record['gamertag']}\n"
-                f"* **Rating**: {record['rating']}\n"
-                f"* **Events Participated**: {events_str}\n"
-            )
-
-        sets_res = session.run(
-            player_sets_cypher,
-            player_names=player_names,
-            default_rating=DEFAULT_ELO_RATING,
-        )
-        sets_lines = []
-        for record in sets_res:
-            line = (
-                f"- {record['p1']} (Rating: {record['p1_rating']}) vs {record['p2']} (Rating: {record['p2_rating']}), "
-                f"winner: {record['winner']}, event: {record['event']} ({record['tournament']})."
-            )
-            sets_lines.append(line)
-
-        if sets_lines:
-            context_lines.append("### Relevant Matches")
-            context_lines.extend(sets_lines)
-        else:
-            context_lines.append("### Relevant Matches\n* No matches found in database.")
-
-    driver.close()
 
     context_str = "\n".join(context_lines)
     _agent_log(
@@ -366,14 +323,7 @@ def get_global_context(event_names: list[str] = None, years: list[str] = None) -
     """Retrieves event summaries, filtering by matched names/years or limiting default ones to save tokens."""
     t0 = time.time()
     _agent_log("neo4j_global_context_start", {"events": event_names, "years": years}, "A_global")
-    try:
-        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
-        driver.verify_connectivity()
-    except Exception as exc:
-        print(f"Neo4j unavailable ({exc}); using fallback/demo tournament context.")
-        _agent_log("neo4j_global_context_fallback", {"error": str(exc)}, "A_global")
-        return _load_demo_context()
-
+    
     context_lines = []
 
     if event_names or years:
@@ -404,15 +354,18 @@ def get_global_context(event_names: list[str] = None, years: list[str] = None) -
         """
         params = {}
 
-    with driver.session() as session:
-        res = session.run(cypher, **params)
-        for record in res:
-            tourney = record["tournament"] or "Unknown Tournament"
-            summary = record["summary"]
-            # Prepend tournament info to the summary
-            context_lines.append(f"## TOURNAMENT: {tourney}\n{summary}")
-
-    driver.close()
+    try:
+        with driver.session() as session:
+            res = session.run(cypher, **params)
+            for record in res:
+                tourney = record["tournament"] or "Unknown Tournament"
+                summary = record["summary"]
+                # Prepend tournament info to the summary
+                context_lines.append(f"## TOURNAMENT: {tourney}\n{summary}")
+    except Exception as exc:
+        print(f"Neo4j query failed ({exc}); using fallback/demo tournament context.")
+        _agent_log("neo4j_global_context_fallback", {"error": str(exc)}, "A_global")
+        return _load_demo_context()
 
     if not context_lines:
         print("No event summaries found in Neo4j; using fallback/demo tournament context.")
@@ -440,8 +393,6 @@ def get_database_metadata() -> str:
         return _DATABASE_METADATA_CACHE
         
     try:
-        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
-        driver.verify_connectivity()
         with driver.session() as session:
             # Fetch unique tournaments
             tourneys_res = session.run("MATCH (e:Event) WHERE e.tournament_name IS NOT NULL RETURN DISTINCT e.tournament_name AS name ORDER BY name")
@@ -450,8 +401,6 @@ def get_database_metadata() -> str:
             # Fetch unique games
             games_res = session.run("MATCH (e:Event) WHERE e.name IS NOT NULL RETURN DISTINCT e.name AS name ORDER BY name")
             games = [r["name"] for r in games_res]
-            
-        driver.close()
         
         metadata_lines = [
             "### DATABASE METADATA",
@@ -609,28 +558,22 @@ def _call_deepseek_chat_completion(system_message: str, user_message: str, start
 
 def _call_deepseek_chat_completion_stream(system_message: str, user_message: str, start_time: float, question: str, tournament_data: str):
     """Yield DeepSeek chat tokens from the streaming API, enforcing a 30s budget."""
-    # Prevent hangs from proxy/Vercel buffering or API streaming incompatibilities
-    # by calling the working non-streaming API and yielding the result as a single chunk.
-    try:
-        ans = _call_deepseek_chat_completion(system_message, user_message, start_time, question, tournament_data)
-        yield ans
-        return
-    except Exception as exc:
-        print(f"Non-streaming fallback failed: {exc}. Trying raw stream...")
-
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json",
     }
 
-    # Use v1 first, consistent with non-streaming completion, to avoid hanging on wrong URLs
     candidate_urls = [
         f"{DEEPSEEK_BASE_URL}/v1/chat/completions",
         f"{DEEPSEEK_BASE_URL}/chat/completions",
     ]
 
     last_error = None
+    stream_succeeded = False
+
     for url in candidate_urls:
+        if stream_succeeded:
+            break
         for attempt in range(1, 6):
             elapsed = time.time() - start_time
             if elapsed >= 30.0:
@@ -682,6 +625,7 @@ def _call_deepseek_chat_completion_stream(system_message: str, user_message: str
                     if not raw_line_stripped:
                         continue
                     if raw_line_stripped == "data: [DONE]":
+                        stream_succeeded = True
                         return
                     if not raw_line_stripped.startswith("data: "):
                         # check if it is a JSON error
@@ -714,6 +658,7 @@ def _call_deepseek_chat_completion_stream(system_message: str, user_message: str
                             yield "\n\n[Answer]\n"
                         has_generated_any_content = True
                         yield text
+                stream_succeeded = True
                 return
             except NonRetryableError as exc:
                 last_error = exc
@@ -727,7 +672,13 @@ def _call_deepseek_chat_completion_stream(system_message: str, user_message: str
                     continue
                 break
 
-    raise RuntimeError(f"DeepSeek chat completion failed: {last_error}")
+    if not stream_succeeded:
+        print(f"Streaming failed or skipped (error: {last_error}). Falling back to non-streaming...")
+        try:
+            ans = _call_deepseek_chat_completion(system_message, user_message, start_time, question, tournament_data)
+            yield ans
+        except Exception as exc:
+            raise RuntimeError(f"DeepSeek chat completion streaming and fallback both failed. Streaming error: {last_error}. Fallback error: {exc}")
 
 
 def _generate_hf_answer(question: str, tournament_data: str, system_message: str, start_time: float) -> str:
