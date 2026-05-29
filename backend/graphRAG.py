@@ -519,21 +519,11 @@ def _message_text_from_chat_output(out) -> str:
     return ""
 
 
-def _call_deepseek_chat_completion(system_message: str, user_message: str) -> str:
-    """Call DeepSeek's OpenAI-compatible chat completions API."""
+def _call_deepseek_chat_completion(system_message: str, user_message: str, start_time: float, question: str, tournament_data: str) -> str:
+    """Call DeepSeek's OpenAI-compatible chat completions API with 30-second budget enforcement."""
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json",
-    }
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": user_message},
-        ],
-        "temperature": 0.4,
-        "max_tokens": 1500,
-        "stream": False,
     }
 
     candidate_urls = [
@@ -544,8 +534,28 @@ def _call_deepseek_chat_completion(system_message: str, user_message: str) -> st
     last_error = None
     for url in candidate_urls:
         for attempt in range(1, 6):
+            elapsed = time.time() - start_time
+            if elapsed >= 30.0:
+                print("DeepSeek chat completion: 30s budget exceeded before request.")
+                fallback_text, _, _ = _demo_answer(question, tournament_data, system_message)
+                return f"[Answer (Demo Fallback)]\n{fallback_text}"
+
+            budget = 30.0 - elapsed
+            request_timeout = min(15.0, budget)
+
+            payload = {
+                "model": DEEPSEEK_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": user_message},
+                ],
+                "temperature": 0.4,
+                "max_tokens": 1500,
+                "stream": False,
+            }
+
             try:
-                response = requests.post(url, headers=headers, json=payload, timeout=15)
+                response = requests.post(url, headers=headers, json=payload, timeout=request_timeout)
                 if response.status_code in (429, 503):
                     wait = min(2 * attempt, 10)
                     print(f"  [WAIT] DeepSeek returned {response.status_code}, retry {attempt}/5 in {wait}s...")
@@ -578,7 +588,9 @@ def _call_deepseek_chat_completion(system_message: str, user_message: str) -> st
                             reasoning = str(message[attr]).strip()
                             break
                     if reasoning:
-                        text = f"[Thinking Process]\n{reasoning}"
+                        # Append demo fallback to keep answers complete if content was empty due to timeout
+                        demo_text, _, _ = _demo_answer(question, tournament_data, system_message)
+                        text = f"[Thinking Process]\n{reasoning}\n\n[Answer (Demo Fallback)]\n{demo_text}"
                     else:
                         print("  [ERROR] DeepSeek response did not include message content. Skipping retries.")
                         raise NonRetryableError("DeepSeek response did not include message content")
@@ -598,12 +610,12 @@ def _call_deepseek_chat_completion(system_message: str, user_message: str) -> st
     raise RuntimeError(f"DeepSeek chat completion failed: {last_error}")
 
 
-def _call_deepseek_chat_completion_stream(system_message: str, user_message: str):
-    """Yield DeepSeek chat tokens from the streaming API."""
+def _call_deepseek_chat_completion_stream(system_message: str, user_message: str, start_time: float, question: str, tournament_data: str):
+    """Yield DeepSeek chat tokens from the streaming API, enforcing a 30s budget."""
     # Prevent hangs from proxy/Vercel buffering or API streaming incompatibilities
     # by calling the working non-streaming API and yielding the result as a single chunk.
     try:
-        ans = _call_deepseek_chat_completion(system_message, user_message)
+        ans = _call_deepseek_chat_completion(system_message, user_message, start_time, question, tournament_data)
         yield ans
         return
     except Exception as exc:
@@ -612,16 +624,6 @@ def _call_deepseek_chat_completion_stream(system_message: str, user_message: str
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json",
-    }
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": user_message},
-        ],
-        "temperature": 0.4,
-        "max_tokens": 1500,
-        "stream": True,
     }
 
     # Use v1 first, consistent with non-streaming completion, to avoid hanging on wrong URLs
@@ -633,8 +635,29 @@ def _call_deepseek_chat_completion_stream(system_message: str, user_message: str
     last_error = None
     for url in candidate_urls:
         for attempt in range(1, 6):
+            elapsed = time.time() - start_time
+            if elapsed >= 30.0:
+                print("DeepSeek streaming: 30s budget exceeded before request.")
+                fallback_text, _, _ = _demo_answer(question, tournament_data, system_message)
+                yield f"[Answer (Demo Fallback)]\n{fallback_text}"
+                return
+
+            budget = 30.0 - elapsed
+            request_timeout = min(15.0, budget)
+
+            payload = {
+                "model": DEEPSEEK_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": user_message},
+                ],
+                "temperature": 0.4,
+                "max_tokens": 1500,
+                "stream": True,
+            }
+
             try:
-                response = requests.post(url, headers=headers, json=payload, stream=True, timeout=15)
+                response = requests.post(url, headers=headers, json=payload, stream=True, timeout=request_timeout)
                 if response.status_code in (429, 503):
                     wait = min(2 * attempt, 10)
                     print(f"  [WAIT] DeepSeek returned {response.status_code}, retry {attempt}/5 in {wait}s...")
@@ -646,7 +669,18 @@ def _call_deepseek_chat_completion_stream(system_message: str, user_message: str
                     break
                 response.raise_for_status()
                 has_started_reasoning = False
+                has_generated_any_content = False
                 for raw_line in response.iter_lines(decode_unicode=True):
+                    # Check 30s time budget inside the stream loop
+                    if time.time() - start_time > 30.0:
+                        print("30s budget exceeded during stream loop.")
+                        if not has_generated_any_content:
+                            demo_text, _, _ = _demo_answer(question, tournament_data, system_message)
+                            yield f"\n\n[Answer (Demo Fallback)]\n{demo_text}"
+                        else:
+                            yield "\n\n[Answer cut off due to 30s timeout]"
+                        return
+
                     if not raw_line:
                         continue
                     raw_line_stripped = raw_line.strip()
@@ -683,6 +717,7 @@ def _call_deepseek_chat_completion_stream(system_message: str, user_message: str
                         if has_started_reasoning:
                             has_started_reasoning = False
                             yield "\n\n[Answer]\n"
+                        has_generated_any_content = True
                         yield text
                 return
             except NonRetryableError as exc:
@@ -700,9 +735,8 @@ def _call_deepseek_chat_completion_stream(system_message: str, user_message: str
     raise RuntimeError(f"DeepSeek chat completion failed: {last_error}")
 
 
-def _generate_hf_answer(question: str, tournament_data: str, system_message: str) -> str:
+def _generate_hf_answer(question: str, tournament_data: str, system_message: str, start_time: float) -> str:
     endpoint = HF_ENDPOINT_URL.rstrip("/")
-    client = InferenceClient(base_url=endpoint, token=HF_TOKEN, timeout=15)
 
     model_id = "unsloth/llama-2-7b-chat"
     try:
@@ -731,7 +765,16 @@ def _generate_hf_answer(question: str, tournament_data: str, system_message: str
     MAX_RETRIES = 5
     out = None
     for attempt in range(1, MAX_RETRIES + 1):
+        elapsed = time.time() - start_time
+        if elapsed >= 30.0:
+            print("HF inference: 30s budget exceeded before request.")
+            fallback_text, _, _ = _demo_answer(question, tournament_data, system_message)
+            return fallback_text
+
+        budget = 30.0 - elapsed
+        request_timeout = min(15.0, budget)
         try:
+            client = InferenceClient(base_url=endpoint, token=HF_TOKEN, timeout=request_timeout)
             out = client.chat_completion(
                 model=model_id,
                 messages=[
@@ -791,6 +834,7 @@ def _generate_hf_answer(question: str, tournament_data: str, system_message: str
 
 
 def generate_answer(question):
+    start_time = time.time()
     print("Fetching graph data...")
     tournament_data, system_message = build_rag_context(question)
 
@@ -811,7 +855,7 @@ def generate_answer(question):
         )
         t1 = time.time()
         try:
-            text = _call_deepseek_chat_completion(system_message, user_message)
+            text = _call_deepseek_chat_completion(system_message, user_message, start_time, question, tournament_data)
             elapsed = time.time() - t1
             print(f"DeepSeek latency: {elapsed:.2f}s ({elapsed/60:.1f} min)")
             _agent_log(
@@ -827,14 +871,15 @@ def generate_answer(question):
                 return _demo_answer(question, tournament_data, system_message)
 
     if use_hf:
-        return _generate_hf_answer(question, tournament_data, system_message), tournament_data, system_message
+        return _generate_hf_answer(question, tournament_data, system_message, start_time), tournament_data, system_message
 
     print("Chat provider not configured for Hugging Face/DeepSeek; using demo commentator responses.")
     return _demo_answer(question, tournament_data, system_message)
 
 
 def generate_answer_stream(question):
-    """Stream the generated answer as newline-delimited JSON events."""
+    """Stream the generated answer as newline-delimited JSON events, enforcing a 30s budget."""
+    start_time = time.time()
     yield _json_line("status", text="Reading bracket data...")
     print("Fetching graph data...")
     tournament_data, system_message = build_rag_context(question)
@@ -863,7 +908,7 @@ def generate_answer_stream(question):
         )
         t1 = time.time()
         try:
-            for token in _call_deepseek_chat_completion_stream(system_message, user_message):
+            for token in _call_deepseek_chat_completion_stream(system_message, user_message, start_time, question, tournament_data):
                 yield _json_line("delta", text=token)
             elapsed_ms = int((time.time() - t1) * 1000)
             _agent_log(
@@ -898,7 +943,7 @@ def generate_answer_stream(question):
 
     if use_hf:
         yield _json_line("status", text="Generating fallback answer...")
-        answer = _generate_hf_answer(question, tournament_data, system_message)
+        answer = _generate_hf_answer(question, tournament_data, system_message, start_time)
         yield _json_line("delta", text=answer)
         yield _json_line("done", elapsed_ms=0, fallback=True)
         yield _json_line(
