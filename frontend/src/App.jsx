@@ -4,7 +4,7 @@ const SUGGESTIONS = [
   "Who won the Street Fighter 6 bracket?",
   "Were there any upsets?",
   "Who had the most wins?",
-  "Tell me about the grand finals",
+  "Who performed best in each game",
 ]
 
 function formatTime(date) {
