@@ -3,10 +3,6 @@
   "version": 2,
   "builds": [
     {
-      "src": "backend/main.py",
-      "use": "@vercel/python"
-    },
-    {
       "src": "frontend/package.json",
       "use": "@vercel/static-build",
       "config": {
@@ -17,31 +13,31 @@
   "routes": [
     {
       "src": "/chat/stream",
-      "dest": "backend/main.py"
+      "dest": "https://path-of-the-fist.onrender.com/chat/stream"
     },
     {
       "src": "/chat",
-      "dest": "backend/main.py"
+      "dest": "https://path-of-the-fist.onrender.com/chat"
     },
     {
       "src": "/events/(.*)",
-      "dest": "backend/main.py"
+      "dest": "https://path-of-the-fist.onrender.com/events/$1"
     },
     {
       "src": "/players/(.*)",
-      "dest": "backend/main.py"
+      "dest": "https://path-of-the-fist.onrender.com/players/$1"
     },
     {
       "src": "/sets/(.*)",
-      "dest": "backend/main.py"
+      "dest": "https://path-of-the-fist.onrender.com/sets/$1"
     },
     {
       "src": "/health",
-      "dest": "backend/main.py"
+      "dest": "https://path-of-the-fist.onrender.com/health"
     },
     {
       "src": "/sync/(.*)",
-      "dest": "backend/main.py"
+      "dest": "https://path-of-the-fist.onrender.com/sync/$1"
     },
     {
       "src": "/assets/(.*)",
