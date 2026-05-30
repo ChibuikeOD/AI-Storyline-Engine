@@ -253,7 +253,7 @@ export default function App() {
           </h1>
           <nav className="flex gap-6 mt-2">
             <span className="text-on-surface-variant font-label-caps text-label-caps px-2 py-1 select-none">
-              COMBO BREAKER 2025
+              DELIVERING INSIGHTS FROM COMBO BREAKER 2023 - 2026
             </span>
           </nav>
         </div>
@@ -281,13 +281,6 @@ export default function App() {
 
           {/* Chat Messages Area */}
           <div className="flex-1 overflow-y-auto pr-2 flex flex-col gap-6 custom-scrollbar pb-6">
-            {/* System Message */}
-            <div className="text-center my-2 flex-shrink-0">
-              <span className="inline-block bg-error text-on-error font-label-caps text-label-caps px-4 py-1 border-y-2 border-dashed border-on-error uppercase">
-                GraphRAG Commentator Online
-              </span>
-            </div>
-
             {/* Empty State / Welcome */}
             {!hasMessages && (
               <div className="flex-1 flex flex-col items-center justify-center text-center p-6 bg-surface-container-high border-2 border-dashed border-outline-variant max-w-2xl mx-auto my-auto skew-x-[-6deg] flex-shrink-0">
@@ -329,7 +322,7 @@ export default function App() {
                   {msg.role === 'user' ? (
                     <>
                       <span className="font-label-caps text-label-caps text-primary-fixed">
-                        P1_CHALLENGER
+                        YOU
                       </span>
                       <div className="w-6 h-6 rounded-sm bg-surface-variant overflow-hidden border border-outline flex items-center justify-center">
                         <span className="material-symbols-outlined text-sm text-outline-variant">
@@ -348,7 +341,7 @@ export default function App() {
                         </span>
                       </div>
                       <span className="font-label-caps text-label-caps text-tertiary-container bg-on-tertiary-container px-2 py-0.5">
-                        FIST BOT [AI]
+                        FIST BOT
                       </span>
                       {msg.latency && (
                         <span className="font-label-caps text-[10px] text-outline-variant bg-surface-container-low px-2 py-0.5 flex items-center gap-1 border border-outline-variant">
