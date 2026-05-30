@@ -74,6 +74,9 @@ export default function App() {
       time: new Date(),
       streaming: true,
       pending: true,
+      fullText: '',
+      thinking: '',
+      isThinking: false,
     }
 
     setMessages(prev => [...prev, userMsg, assistantMsg])
@@ -121,23 +124,38 @@ export default function App() {
             }
 
             if (event.type === 'delta') {
-              updateMessage(assistantId, (msg) => ({
-                ...msg,
-                text: msg.pending ? event.text ?? '' : `${msg.text ?? ''}${event.text ?? ''}`,
-                pending: false,
-              }))
+              const token = event.text ?? ''
+              updateMessage(assistantId, (msg) => {
+                const fullText = msg.pending ? token : `${msg.fullText ?? ''}${token}`
+                const { thinking, answer } = parseThinkingAndAnswer(fullText)
+                return {
+                  ...msg,
+                  fullText,
+                  thinking,
+                  text: answer,
+                  isThinking: fullText.startsWith('[Thinking Process]\n') && !fullText.includes('\n\n[Answer]\n'),
+                  pending: false,
+                }
+              })
               return
             }
 
             if (event.type === 'done') {
               const latency = ((performance.now() - startedAt) / 1000).toFixed(2)
-              updateMessage(assistantId, (msg) => ({
-                ...msg,
-                streaming: false,
-                text: msg.pending ? 'No answer came back. Try again in a moment.' : msg.text,
-                pending: false,
-                latency,
-              }))
+              updateMessage(assistantId, (msg) => {
+                const finalRaw = msg.pending ? 'No answer came back. Try again in a moment.' : (msg.fullText ?? msg.text)
+                const { thinking, answer } = parseThinkingAndAnswer(finalRaw)
+                return {
+                  ...msg,
+                  streaming: false,
+                  fullText: finalRaw,
+                  thinking,
+                  text: answer,
+                  isThinking: false,
+                  pending: false,
+                  latency,
+                }
+              })
               return
             }
 
@@ -151,22 +169,37 @@ export default function App() {
       if (buffer.trim()) {
         parseStreamLine(buffer, (event) => {
           if (event.type === 'delta') {
-            updateMessage(assistantId, (msg) => ({
-              ...msg,
-              text: msg.pending ? event.text ?? '' : `${msg.text ?? ''}${event.text ?? ''}`,
-              pending: false,
-            }))
+            const token = event.text ?? ''
+            updateMessage(assistantId, (msg) => {
+              const fullText = msg.pending ? token : `${msg.fullText ?? ''}${token}`
+              const { thinking, answer } = parseThinkingAndAnswer(fullText)
+              return {
+                ...msg,
+                fullText,
+                thinking,
+                text: answer,
+                isThinking: fullText.startsWith('[Thinking Process]\n') && !fullText.includes('\n\n[Answer]\n'),
+                pending: false,
+              }
+            })
           }
         })
       }
 
-      updateMessage(assistantId, (msg) => ({
-        ...msg,
-        streaming: false,
-        text: msg.pending ? 'No answer came back. Try again in a moment.' : msg.text,
-        pending: false,
-        latency: msg.latency ?? ((performance.now() - startedAt) / 1000).toFixed(2),
-      }))
+      updateMessage(assistantId, (msg) => {
+        const finalRaw = msg.pending ? 'No answer came back. Try again in a moment.' : (msg.fullText ?? msg.text)
+        const { thinking, answer } = parseThinkingAndAnswer(finalRaw)
+        return {
+          ...msg,
+          streaming: false,
+          fullText: finalRaw,
+          thinking,
+          text: answer,
+          isThinking: false,
+          pending: false,
+          latency: msg.latency ?? ((performance.now() - startedAt) / 1000).toFixed(2),
+        }
+      })
     } catch (err) {
       const elapsed = ((performance.now() - startedAt) / 1000).toFixed(2)
       updateMessage(assistantId, (msg) => ({
@@ -347,6 +380,14 @@ export default function App() {
                     </div>
                   )}
 
+                  {msg.role !== 'user' && (
+                    <ThinkingAccordion
+                      thinking={msg.thinking}
+                      isThinking={msg.isThinking}
+                      streaming={msg.streaming}
+                    />
+                  )}
+
                   <p className="whitespace-pre-wrap leading-relaxed">{msg.text}</p>
 
                   {msg.time && (
@@ -445,6 +486,78 @@ function SourceContext({ context, systemPrompt }) {
                 </p>
               </div>
             )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function parseThinkingAndAnswer(fullText) {
+  let thinking = '';
+  let answer = fullText;
+
+  const thinkingStart = '[Thinking Process]\n';
+  const answerStart = '\n\n[Answer]\n';
+
+  if (fullText.startsWith(thinkingStart)) {
+    const parts = fullText.slice(thinkingStart.length).split(answerStart);
+    if (parts.length > 1) {
+      thinking = parts[0];
+      answer = parts.slice(1).join(answerStart);
+    } else {
+      thinking = parts[0];
+      answer = '';
+    }
+  }
+
+  return { thinking, answer };
+}
+
+function ThinkingAccordion({ thinking, isThinking, streaming }) {
+  const [userToggled, setUserToggled] = useState(false)
+  const [isOpen, setIsOpen] = useState(true)
+
+  // Automatically collapse when thinking finishes
+  useEffect(() => {
+    if (!isThinking && !streaming) {
+      setIsOpen(false)
+    }
+  }, [isThinking, streaming])
+
+  if (!thinking) return null
+
+  const handleToggle = () => {
+    setUserToggled(true)
+    setIsOpen(!isOpen)
+  }
+
+  // If the user hasn't interacted, follow the automatic state
+  const displayedOpen = userToggled ? isOpen : isThinking
+
+  return (
+    <div className="mb-4 border-2 border-outline-variant bg-surface-container-low skew-x-[-6deg] overflow-hidden text-xs max-w-xl">
+      <div className="skew-x-[6deg]">
+        <button
+          className="w-full flex justify-between items-center px-4 py-2 font-label-caps text-label-caps text-on-surface-variant bg-surface-container-high hover:bg-primary-container hover:text-on-primary-container transition-colors"
+          onClick={handleToggle}
+        >
+          <span className="flex items-center gap-2">
+            {isThinking ? (
+              <span className="animate-spin h-3 w-3 border-2 border-primary-fixed border-t-transparent rounded-full" />
+            ) : (
+              <span className="material-symbols-outlined text-sm text-primary-fixed font-bold">check_circle</span>
+            )}
+            {isThinking ? 'THINKING PROCESS...' : 'THOUGHT PROCESS'}
+          </span>
+          <span className="material-symbols-outlined text-sm">
+            {displayedOpen ? 'keyboard_arrow_up' : 'keyboard_arrow_down'}
+          </span>
+        </button>
+
+        {displayedOpen && (
+          <div className="p-4 font-mono text-[11px] text-outline-variant bg-surface-container-lowest max-h-[180px] overflow-y-auto custom-scrollbar whitespace-pre-wrap leading-relaxed select-all text-left">
+            {thinking}
           </div>
         )}
       </div>
